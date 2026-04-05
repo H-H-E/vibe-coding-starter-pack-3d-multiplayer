@@ -1,8 +1,5 @@
 /**
  * FlailPlayer.ts — The player's flail entity.
- *
- * Owns: Body, WiggleChain, CollisionSystem, InputSystem.
- * Runs physics each frame, handles anchor mechanic.
  */
 
 import { Body } from '../physics/Body';
@@ -36,7 +33,7 @@ export class FlailPlayer {
   cameraTargetY: number = 5;
 
   constructor(startX: number = 0, startY: number = 2) {
-    this.body = new Body({ mass: 1000, gravity: 25, friction: 0.8, positionX: startX, positionY: startY });
+    this.body = new Body({ mass: 1000, gravity: 25, friction: 0.85, positionX: startX, positionY: startY });
     this.chain = new WiggleChain(this.body, {
       segmentCount: 10,
       restLength: 0.8,
@@ -48,18 +45,15 @@ export class FlailPlayer {
     this.collision = new CollisionSystem();
     this.input = new InputSystem();
 
-    // Initialize head near body
+    // Initialize chain head near body
     const head = this.chain.getHead();
     if (head) {
-      head.positionX = startX + 2;
-      head.positionY = startY + 2;
-      this.chain.setMouse(startX + 2, startY + 2);
+      head.positionX = startX + 1.5;
+      head.positionY = startY + 1.0;
+      this.chain.setMouse(startX + 1.5, startY + 1.0);
     }
   }
 
-  /**
-   * Attach input listeners to a canvas.
-   */
   attachInput(canvas: HTMLCanvasElement) {
     this.input.attach(canvas);
   }
@@ -68,23 +62,17 @@ export class FlailPlayer {
     this.input.detach();
   }
 
-  /**
-   * Main update loop — call every frame.
-   * @param dt Delta time in seconds
-   */
   update(dt: number) {
     this.input.update();
 
+    // ── 1. Chain physics ────────────────────────────────────────
+    const inFaraday = this.collision.isInFaraday(this.body.positionX, this.body.positionY);
+
+    // Anchor mechanic — left click to lock head
     const mouse = this.input.mouse;
     const head = this.chain.getHead();
 
-    // Update mouse world position (needs camera context — called externally)
-    // Check if body is in a Faraday cage
-    const inFaraday = this.collision.isInFaraday(this.body.positionX, this.body.positionY);
-
-    // Handle anchor mechanic
     if (mouse.leftJustPressed && head && !this.chain.isHeadAnchored()) {
-      // Find nearest anchor point
       const result = this.collision.findAnchorTarget(head.positionX, head.positionY, inFaraday);
       if (result.hit && result.surface) {
         this.chain.anchorHead(result.hitX, result.hitY);
@@ -103,52 +91,52 @@ export class FlailPlayer {
     // Get reaction force from chain on body
     const chainForce = this.chain.getForceOnBody();
 
-    // Update body physics
+    // ── 2. Apply forces to body ──────────────────────────────────
+    this.body.applyForce(chainForce.x, chainForce.y);
+    // Gravity is already in body.update(), so we just integrate here
+    this.body.velocityX += (-this.body.gravity * this.body.mass / this.body.mass) * 0; // gravity handled in body.update
+
+    // ── 3. Integrate body velocity → position ────────────────────
     this.body.update(dt, chainForce.x, chainForce.y);
 
-    // Check body-surface collisions
-    const col = this.collision.checkBodyCollision(this.body.positionX, this.body.positionY);
+    // ── 4. Resolve collision BEFORE final position is set ────────
+    const col = this.collision.resolveBodyCollision(
+      this.body.positionX,
+      this.body.positionY,
+      this.body.velocityX,
+      this.body.velocityY
+    );
+
+    this.body.positionX = col.newX;
+    this.body.positionY = col.newY;
+    this.body.velocityX = col.newVelX;
+    this.body.velocityY = col.newVelY;
+    this.body.grounded = col.grounded;
+
+    // Surface friction
     if (col.grounded && col.surface) {
-      const surfaceTop = col.surface.y;
-      const bodyBottom = this.body.positionY - this.body.BODY_HEIGHT / 2;
+      if (col.surface.type === 'silt') {
+        this.body.friction = 0.0;
+      } else {
+        this.body.friction = 0.85;
+      }
 
-      if (bodyBottom < surfaceTop + 0.1) {
-        this.body.positionY = surfaceTop + this.body.BODY_HEIGHT / 2;
-        const vel = Math.abs(this.body.velocityY);
-
-        if (vel > 5) {
-          // Try to break glass
-          this.collision.tryBreakGlass(col.surface, vel);
-        }
-
-        this.body.velocityY = 0;
-        this.body.grounded = true;
-
-        // Surface friction
-        if (col.surface.type === 'silt') {
-          this.body.friction = 0.0; // Zero friction — will slide
-        } else {
-          this.body.friction = 0.85;
-        }
-
-        // Snap body Y to surface
-        this.body.positionY = surfaceTop + this.body.BODY_HEIGHT / 2;
+      // Try to break glass on landing
+      if (col.surface.type === 'glass') {
+        this.collision.tryBreakGlass(col.surface, this.body.velocityY);
       }
     }
 
-    // Update camera target — keep body in lower 1/3 of view
-    this.cameraTargetX = this.body.positionX;
-    this.cameraTargetY = this.body.positionY + 3; // Keep body lower
-
-    // Keep head synced to input mouse
+    // ── 5. Update mouse attraction ───────────────────────────────
     if (head && !this.chain.isHeadAnchored()) {
       this.chain.setMouse(mouse.worldX, mouse.worldY);
     }
+
+    // ── 6. Camera target ─────────────────────────────────────────
+    this.cameraTargetX = this.body.positionX;
+    this.cameraTargetY = this.body.positionY + 4;
   }
 
-  /**
-   * Get current state for rendering.
-   */
   getState(): FlailPlayerState {
     const head = this.chain.getHead();
     return {
@@ -161,7 +149,7 @@ export class FlailPlayer {
       chainTension: this.chain.getTotalTension(),
       isAnchored: this.chain.isHeadAnchored(),
       grounded: this.body.grounded,
-      surfaceType: this.anchoredSurfaceType,
+      surfaceType: this.anchoredSurfaceType ?? (this.body.grounded ? 'concrete' : null),
     };
   }
 

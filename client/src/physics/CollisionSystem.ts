@@ -12,70 +12,46 @@ export type SurfaceType = 'concrete' | 'silt' | 'glass' | 'faraday' | 'air';
 export interface Surface {
   type: SurfaceType;
   x: number;        // Left edge
-  y: number;         // Top edge (higher Y = lower on screen in 2D)
+  y: number;         // Top edge (Y increases upward in world space)
   width: number;
   height: number;
-  breakVelocityThreshold?: number; // For shatter-glass
+  breakVelocityThreshold?: number;
   broken?: boolean;
 }
 
-export interface CollisionResult {
-  hit: boolean;
-  surface: Surface | null;
-  hitX: number;
-  hitY: number;
-  normalX: number;
-  normalY: number;
-}
-
-/**
- * Simple AABB collision check.
- */
-function aabbOverlap(
-  ax: number, ay: number, aw: number, ah: number,
-  bx: number, by: number, bw: number, bh: number
-): boolean {
-  return ax < bx + bw && ax + aw > bx && ay < by + bh && ay + ah > by;
-}
+export const BODY_WIDTH = 1.2;
+export const BODY_HEIGHT = 1.2;
+export const ANCHOR_RADIUS = 2.5;
 
 export class CollisionSystem {
   private surfaces: Surface[] = [];
-  readonly ANCHOR_RADIUS = 2.5; // World units — how close head needs to be to anchor
-  readonly BODY_WIDTH = 1.2;
-  readonly BODY_HEIGHT = 1.2;
 
   constructor() {
     this.buildLevel();
   }
 
-  /**
-   * Build the level geometry.
-   * TODO: Load from procedural generator.
-   */
   private buildLevel() {
     this.surfaces = [];
 
-    // Ground floor — wide concrete
-    this.surfaces.push({ type: 'concrete', x: -20, y: -5, width: 60, height: 5 });
+    // Ground floor — thick concrete slab from y=-10 to y=-5 (height=5)
+    this.surfaces.push({ type: 'concrete', x: -20, y: -10, width: 60, height: 5 });
 
-    // Stepped platforms going up
+    // Stepped platforms going up (y increases upward)
     const platforms = [
-      { x: -5, y: 0, w: 6, type: 'concrete' as SurfaceType },
-      { x: 3, y: 2, w: 5, type: 'concrete' as SurfaceType },
-      { x: -8, y: 4, w: 5, type: 'concrete' as SurfaceType },
-      { x: 0, y: 7, w: 4, type: 'concrete' as SurfaceType },
-      { x: -4, y: 10, w: 4, type: 'concrete' as SurfaceType },
-      { x: 2, y: 13, w: 5, type: 'concrete' as SurfaceType },
-      // Silt slope — no friction, will slide
-      { x: -10, y: 5, w: 3, h: 0.3, type: 'silt' as SurfaceType },
-      // Glass platform
-      { x: -2, y: 16, w: 4, h: 0.4, type: 'glass' as SurfaceType, breakVel: 15 },
-      // Another concrete above glass
-      { x: 1, y: 19, w: 5, type: 'concrete' as SurfaceType },
-      // Faraday cage (no anchoring)
-      { x: -6, y: 18, w: 3, h: 6, type: 'faraday' as SurfaceType },
-      // Top platform
-      { x: -3, y: 23, w: 6, type: 'concrete' as SurfaceType },
+      { x: -5,   y: -2,   w: 6,   h: 0.5, type: 'concrete' },
+      { x: 3,    y: 0,    w: 5,   h: 0.5, type: 'concrete' },
+      { x: -8,   y: 2,    w: 5,   h: 0.5, type: 'concrete' },
+      { x: 0,    y: 5,    w: 4,   h: 0.5, type: 'concrete' },
+      { x: -4,   y: 8,    w: 4,   h: 0.5, type: 'concrete' },
+      { x: 2,    y: 11,   w: 5,   h: 0.5, type: 'concrete' },
+      // Silt slope — zero friction
+      { x: -10,  y: 13,   w: 3,   h: 0.3, type: 'silt' },
+      // Glass platform — breaks on hard impact
+      { x: -2,   y: 14,   w: 4,   h: 0.3, type: 'glass', breakVel: 12 },
+      { x: 1,    y: 17,   w: 5,   h: 0.5, type: 'concrete' },
+      // Faraday cage — no anchoring inside
+      { x: -6,   y: 16,   w: 3,   h: 6,   type: 'faraday' },
+      { x: -3,   y: 21,   w: 6,   h: 0.5, type: 'concrete' },
     ];
 
     for (const p of platforms) {
@@ -84,28 +60,97 @@ export class CollisionSystem {
         x: p.x,
         y: p.y,
         width: p.w,
-        height: p.h ?? 0.4,
+        height: p.h,
         breakVelocityThreshold: (p as any).breakVel,
       });
     }
   }
 
   /**
-   * Find the nearest surface within anchor radius of a world point.
+   * Resolve body collision with all surfaces.
+   * CALL BEFORE integrating position — this corrects the position.
+   * Returns the surface the body is resting on (if any).
    */
-  findAnchorTarget(headX: number, headY: number, inFaraday: boolean): CollisionResult {
-    if (inFaraday) {
-      return { hit: false, surface: null, hitX: headX, hitY: headY, normalX: 0, normalY: 0 };
-    }
+  resolveBodyCollision(
+    bodyX: number,
+    bodyY: number,
+    bodyVelX: number,
+    bodyVelY: number
+  ): { surface: Surface | null; grounded: boolean; newX: number; newY: number; newVelX: number; newVelY: number } {
+    const bodyLeft = bodyX - BODY_WIDTH / 2;
+    const bodyRight = bodyX + BODY_WIDTH / 2;
+    const bodyBottom = bodyY - BODY_HEIGHT / 2; // lowest point
+    const bodyTop = bodyY + BODY_HEIGHT / 2;   // highest point
 
-    let bestDist = this.ANCHOR_RADIUS;
-    let best: CollisionResult | null = null;
+    let resolvedX = bodyX;
+    let resolvedY = bodyY;
+    let resolvedVelX = bodyVelX;
+    let resolvedVelY = bodyVelY;
+    let grounded = false;
+    let floorSurface: Surface | null = null;
+    let floorY = -Infinity;
 
     for (const surf of this.surfaces) {
       if (surf.type === 'air' || surf.broken) continue;
-      if (surf.type === 'faraday') continue; // Can't anchor inside faraday
 
-      // Check if head is within ANCHOR_RADIUS of this surface's edges
+      const surfLeft = surf.x;
+      const surfRight = surf.x + surf.width;
+      const surfTop = surf.y + surf.height; // top of surface
+      const surfBottom = surf.y;            // bottom of surface
+
+      // AABB overlap check
+      const overlapsX = bodyRight > surfLeft && bodyLeft < surfRight;
+      const overlapsY = bodyTop > surfBottom && bodyBottom < surfTop;
+
+      if (overlapsX && overlapsY) {
+        // Collision detected — find smallest penetration to resolve
+        const penLeft = bodyRight - surfLeft;   // penetration from left
+        const penRight = surfRight - bodyLeft;   // penetration from right
+        const penBottom = bodyTop - surfBottom; // penetration from below
+        const penTop = surfTop - bodyBottom;    // penetration from above
+
+        const minPen = Math.min(penLeft, penRight, penBottom, penTop);
+
+        if (minPen === penBottom && bodyVelY <= 0) {
+          // Landing on top of surface — push up
+          resolvedY = surfTop + BODY_HEIGHT / 2;
+          resolvedVelY = 0;
+          grounded = true;
+          if (surfTop > floorY) {
+            floorY = surfTop;
+            floorSurface = surf;
+          }
+        } else if (minPen === penTop && bodyVelY > 0) {
+          // Hitting bottom of surface — push down
+          resolvedY = surfBottom - BODY_HEIGHT / 2;
+          resolvedVelY = 0;
+        } else if (minPen === penLeft) {
+          resolvedX = surfLeft - BODY_WIDTH / 2;
+          resolvedVelX = 0;
+        } else if (minPen === penRight) {
+          resolvedX = surfRight + BODY_WIDTH / 2;
+          resolvedVelX = 0;
+        }
+      }
+    }
+
+    return { surface: floorSurface, grounded, newX: resolvedX, newY: resolvedY, newVelX: resolvedVelX, newVelY: resolvedVelY };
+  }
+
+  /**
+   * Find the nearest surface within anchor radius of a world point.
+   */
+  findAnchorTarget(headX: number, headY: number, inFaraday: boolean): { hit: boolean; surface: Surface | null; hitX: number; hitY: number } {
+    if (inFaraday) return { hit: false, surface: null, hitX: headX, hitY: headY };
+
+    let bestDist = ANCHOR_RADIUS;
+    let best: { hit: boolean; surface: Surface | null; hitX: number; hitY: number } | null = null;
+
+    for (const surf of this.surfaces) {
+      if (surf.type === 'air' || surf.broken) continue;
+      if (surf.type === 'faraday') continue;
+
+      // Find nearest point on surface rectangle to head
       const nearestX = Math.max(surf.x, Math.min(headX, surf.x + surf.width));
       const nearestY = Math.max(surf.y, Math.min(headY, surf.y + surf.height));
       const dx = headX - nearestX;
@@ -114,58 +159,11 @@ export class CollisionSystem {
 
       if (dist < bestDist) {
         bestDist = dist;
-        // Surface normal (which face is closest)
-        let nx = 0, ny = 0;
-        if (Math.abs(headX - nearestX) > Math.abs(headY - nearestY)) {
-          nx = dx > 0 ? 1 : -1;
-        } else {
-          ny = dy > 0 ? 1 : -1;
-        }
-        best = {
-          hit: true,
-          surface: surf,
-          hitX: nearestX,
-          hitY: nearestY,
-          normalX: nx,
-          normalY: ny,
-        };
+        best = { hit: true, surface: surf, hitX: nearestX, hitY: nearestY };
       }
     }
 
-    return best ?? { hit: false, surface: null, hitX: headX, hitY: headY, normalX: 0, normalY: 0 };
-  }
-
-  /**
-   * Check body collision with all surfaces.
-   */
-  checkBodyCollision(bodyX: number, bodyY: number): { surface: Surface | null; grounded: boolean } {
-    let grounded = false;
-    let floorSurface: Surface | null = null;
-
-    for (const surf of this.surfaces) {
-      if (surf.type === 'air' || surf.broken) continue;
-
-      const bw = this.BODY_WIDTH;
-      const bh = this.BODY_HEIGHT;
-      // Body bottom
-      const bodyBottom = bodyY - bh / 2;
-      const bodyLeft = bodyX - bw / 2;
-      const bodyRight = bodyX + bw / 2;
-
-      // Top face of surface
-      if (aabbOverlap(bodyLeft, bodyBottom, bw, bh, surf.x, surf.y, surf.width, surf.height)) {
-        if (surf.type === 'glass' && bodyY < surf.y + surf.height) {
-          // Check break velocity
-          // handled externally
-        }
-        if (!grounded || surf.y < (floorSurface?.y ?? Infinity)) {
-          floorSurface = surf;
-        }
-        grounded = true;
-      }
-    }
-
-    return { surface: floorSurface, grounded };
+    return best ?? { hit: false, surface: null, hitX: headX, hitY: headY };
   }
 
   /**
@@ -183,12 +181,12 @@ export class CollisionSystem {
   }
 
   /**
-   * Break a glass surface if velocity is above threshold.
+   * Break a glass surface if impact velocity exceeds threshold.
    */
   tryBreakGlass(surface: Surface, impactVelocity: number): boolean {
     if (surface.type === 'glass' && !surface.broken) {
-      const threshold = surface.breakVelocityThreshold ?? 15;
-      if (impactVelocity >= threshold) {
+      const threshold = surface.breakVelocityThreshold ?? 12;
+      if (Math.abs(impactVelocity) >= threshold) {
         surface.broken = true;
         return true;
       }

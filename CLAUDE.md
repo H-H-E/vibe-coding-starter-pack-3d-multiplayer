@@ -75,18 +75,52 @@ conn.subscriptionBuilder()
   .subscribe('SELECT * FROM player');
 ```
 
+## Deployment
+
+### Vercel (Frontend) + SpacetimeDB Cloud (Backend)
+
+The client deploys to Vercel. The Rust WASM backend runs on SpacetimeDB Cloud.
+
+**Live database:** `vibe-3d-multiplayer` on `maincloud.spacetimedb.com`
+**Dashboard:** https://spacetimedb.com/vibe-3d-multiplayer
+
+```bash
+# 1. Build + publish server to SpacetimeDB Cloud
+cd server
+spacetime build
+spacetime publish vibe-3d-multiplayer -y
+spacetime generate --lang typescript --out-dir ../client/src/generated --module-path .
+
+# 2. Deploy client to Vercel
+vercel --prod
+```
+
+### Connection Configuration
+
+App.tsx auto-detects local vs production:
+- **Local dev** (`localhost`): connects to `ws://localhost:3000`
+- **Vercel/production**: connects to `wss://maincloud.spacetimedb.com`
+
+Environment variables (set in Vercel dashboard):
+```
+VITE_SPACETIMEDB_URI=maincloud.spacetimedb.com
+VITE_SPACETIMEDB_NAME=vibe-3d-multiplayer
+```
+
 ## Development Commands
 
 ```bash
-# Server
+# Server (local dev)
 cd server
 spacetime build                    # Compile Rust → WASM
 spacetime start                    # Start local SpacetimeDB server (port 3000)
-spacetime publish vibe-multiplayer # Upload module to running server
-spacetime publish vibe-multiplayer -y  # Auto-accept major version upgrades
+spacetime publish vibe-3d-multiplayer # Publish to cloud (or use local alias)
 
-# Regenerate client bindings (after schema/reducer changes)
-spacetime generate --lang typescript --out-dir ../client/src/generated
+# Server (cloud publish — after schema changes)
+cd server
+spacetime build
+spacetime publish vibe-3d-multiplayer -y
+spacetime generate --lang typescript --out-dir ../client/src/generated --module-path .
 
 # Client
 cd client
@@ -94,8 +128,8 @@ npm run dev                        # Vite dev server (localhost:5173)
 npm run build                      # Production build
 
 # Load testing
-npm run simulate                   # 10 bots, 10 seconds
-npm run simulate -- 100 30         # 100 bots, 30 seconds
+npm run simulate                   # 10 bots, 10 seconds (against localhost)
+VITE_SPACETIMEDB_URI=maincloud.spacetimedb.com npm run simulate -- 50 30  # against cloud
 ```
 
 ## Critical Conventions
@@ -106,13 +140,14 @@ npm run simulate -- 100 30         # 100 bots, 30 seconds
 - **Register callbacks before subscribing**: In v2, table backfill fires immediately on subscribe. If callbacks aren't registered yet, you miss the initial data.
 - **Game loop at 20Hz**: The `requestAnimationFrame` loop in App.tsx throttles input sends to every 50ms. Server `delta_time_estimate = 1/20` matches this.
 - **FBX models**: Wizard scale `0.02`, Paladin scale `1.0`. Models in `client/public/models/`.
-- **Connection config**: Hardcoded to `localhost:3000`, database `vibe-multiplayer` in both `App.tsx` and `simulation.ts`.
+- **Connection config**: Auto-detected in `App.tsx` and `simulation.ts` via env vars + `window.location.hostname` check. Falls back to `maincloud.spacetimedb.com` for non-localhost.
 
 ## Schema Changes
 
 Adding/removing table columns requires deleting and republishing the database:
 ```bash
 cd server
-spacetime delete vibe-multiplayer
-spacetime publish vibe-multiplayer
+spacetime delete vibe-3d-multiplayer
+spacetime publish vibe-3d-multiplayer -y
+spacetime generate --lang typescript --out-dir ../client/src/generated --module-path .
 ```

@@ -371,9 +371,13 @@ function App() {
         return;
     }
 
-    const dbHost = "localhost:3000";
-    const dbName = "vibe-multiplayer";
+    const isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+    const dbHost = isLocal
+      ? 'localhost:3000'
+      : (import.meta.env.VITE_SPACETIMEDB_URI || 'maincloud.spacetimedb.com');
+    const dbName = import.meta.env.VITE_SPACETIMEDB_NAME || 'vibe-3d-multiplayer';
 
+    const protocol = isLocal ? 'ws' : 'wss';
     console.log(`Connecting to SpacetimeDB at ${dbHost}, database: ${dbName}...`);
 
     const onConnect = (connection: DbConnection, id: Identity, _token: string) => {
@@ -406,7 +410,7 @@ function App() {
     };
 
     DbConnection.builder()
-      .withUri(`ws://${dbHost}`)
+      .withUri(`${protocol}://${dbHost}`)
       .withDatabaseName(dbName)
       .withConfirmedReads(false)
       .onConnect(onConnect)

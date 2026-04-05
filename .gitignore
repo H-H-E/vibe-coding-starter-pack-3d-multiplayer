@@ -40,3 +40,4 @@ target/
 
 # Distribution
 dist/
+.vercel
